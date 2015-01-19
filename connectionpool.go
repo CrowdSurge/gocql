@@ -151,13 +151,12 @@ func NewSimplePool(cfg *ClusterConfig) (ConnectionPool, error) {
 		}
 
 		e := pool.connect(addr)
-		if e == nil {
-			pool.cFillingPool <- 1
-			go pool.fillPool()
-			break
-		} else {
+		if e != nil {
 			return pool, e
 		}
+		pool.cFillingPool <- 1
+		go pool.fillPool()
+		break
 	}
 
 	return pool, e
