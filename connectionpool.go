@@ -95,7 +95,7 @@ type ConnectionPool interface {
 }
 
 //NewPoolFunc is the type used by ClusterConfig to create a pool of a specific type.
-type NewPoolFunc func(*ClusterConfig) ConnectionPool
+type NewPoolFunc func(*ClusterConfig) (ConnectionPool, error)
 
 //SimplePool is the current implementation of the connection pool inside gocql. This
 //pool is meant to be a simple default used by gocql so users can get up and running
@@ -123,7 +123,8 @@ type SimplePool struct {
 
 //NewSimplePool is the function used by gocql to create the simple connection pool.
 //This is the default if no other pool type is specified.
-func NewSimplePool(cfg *ClusterConfig) ConnectionPool {
+func NewSimplePool(cfg *ClusterConfig) (ConnectionPool, error) {
+	var e error
 	pool := &SimplePool{
 		cfg:          cfg,
 		hostPool:     NewRoundRobin(),
@@ -149,14 +150,17 @@ func NewSimplePool(cfg *ClusterConfig) ConnectionPool {
 			addr = fmt.Sprintf("%s:%d", addr, cfg.Port)
 		}
 
-		if pool.connect(addr) == nil {
+		e := pool.connect(addr)
+		if e == nil {
 			pool.cFillingPool <- 1
 			go pool.fillPool()
 			break
+		} else {
+			return pool, e
 		}
 	}
 
-	return pool
+	return pool, e
 }
 
 func (c *SimplePool) connect(addr string) error {
