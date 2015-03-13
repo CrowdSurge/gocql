@@ -102,7 +102,10 @@ func (cfg *ClusterConfig) CreateSession() (*Session, error) {
 	if len(cfg.Hosts) < 1 {
 		return nil, ErrNoHosts
 	}
-	pool := cfg.ConnPoolType(cfg)
+	pool, e := cfg.ConnPoolType(cfg)
+	if e != nil {
+		return nil, e
+	}
 
 	//Adjust the size of the prepared statements cache to match the latest configuration
 	stmtsLRU.Lock()
