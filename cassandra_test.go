@@ -22,15 +22,16 @@ import (
 )
 
 var (
-	flagCluster    = flag.String("cluster", "127.0.0.1", "a comma-separated list of host:port tuples")
-	flagProto      = flag.Int("proto", 2, "protcol version")
-	flagCQL        = flag.String("cql", "3.0.0", "CQL version")
-	flagRF         = flag.Int("rf", 1, "replication factor for test keyspace")
-	clusterSize    = flag.Int("clusterSize", 1, "the expected size of the cluster")
-	flagRetry      = flag.Int("retries", 5, "number of times to retry queries")
-	flagAutoWait   = flag.Duration("autowait", 1000*time.Millisecond, "time to wait for autodiscovery to fill the hosts poll")
-	flagRunSslTest = flag.Bool("runssl", false, "Set to true to run ssl test")
-	clusterHosts   []string
+	flagCluster      = flag.String("cluster", "127.0.0.1", "a comma-separated list of host:port tuples")
+	flagProto        = flag.Int("proto", 2, "protcol version")
+	flagCQL          = flag.String("cql", "3.0.0", "CQL version")
+	flagRF           = flag.Int("rf", 1, "replication factor for test keyspace")
+	clusterSize      = flag.Int("clusterSize", 1, "the expected size of the cluster")
+	flagRetry        = flag.Int("retries", 5, "number of times to retry queries")
+	flagAutoWait     = flag.Duration("autowait", 1000*time.Millisecond, "time to wait for autodiscovery to fill the hosts poll")
+	flagRunSslTest   = flag.Bool("runssl", false, "Set to true to run ssl test")
+	flagCompressTest = flag.String("compressor", "", "compressor to use")
+	clusterHosts     []string
 )
 
 func init() {
@@ -57,7 +58,7 @@ func createTable(s *Session, table string) error {
 	err := s.Query(table).Consistency(All).Exec()
 	if *clusterSize > 1 {
 		// wait for table definition to propogate
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(1 * time.Second)
 	}
 	return err
 }
@@ -71,6 +72,15 @@ func createCluster() *ClusterConfig {
 	if *flagRetry > 0 {
 		cluster.RetryPolicy = &SimpleRetryPolicy{NumRetries: *flagRetry}
 	}
+
+	switch *flagCompressTest {
+	case "snappy":
+		cluster.Compressor = &SnappyCompressor{}
+	case "":
+	default:
+		panic("invalid compressor: " + *flagCompressTest)
+	}
+
 	cluster = addSslOptions(cluster)
 	return cluster
 }
@@ -114,20 +124,13 @@ func createSession(tb testing.TB) *Session {
 
 //TestRingDiscovery makes sure that you can autodiscover other cluster members when you seed a cluster config with just one node
 func TestRingDiscovery(t *testing.T) {
-
-	cluster := NewCluster(clusterHosts[0])
-	cluster.ProtoVersion = *flagProto
-	cluster.CQLVersion = *flagCQL
-	cluster.Timeout = 5 * time.Second
-	cluster.Consistency = Quorum
-	if *flagRetry > 0 {
-		cluster.RetryPolicy = &SimpleRetryPolicy{NumRetries: *flagRetry}
-	}
+	cluster := createCluster()
+	cluster.Hosts = clusterHosts[:1]
 	cluster.DiscoverHosts = true
-	cluster = addSslOptions(cluster)
+
 	session, err := cluster.CreateSession()
 	if err != nil {
-		t.Errorf("got error connecting to the cluster %v", err)
+		t.Fatalf("got error connecting to the cluster %v", err)
 	}
 
 	if *clusterSize > 1 {
@@ -145,8 +148,8 @@ func TestRingDiscovery(t *testing.T) {
 }
 
 func TestEmptyHosts(t *testing.T) {
-	cluster := NewCluster()
-	cluster = addSslOptions(cluster)
+	cluster := createCluster()
+	cluster.Hosts = nil
 	if session, err := cluster.CreateSession(); err == nil {
 		session.Close()
 		t.Error("expected err, got nil")
@@ -169,11 +172,8 @@ func TestUseStatementError(t *testing.T) {
 
 //TestInvalidKeyspace checks that an invalid keyspace will return promptly and without a flood of connections
 func TestInvalidKeyspace(t *testing.T) {
-	cluster := NewCluster(clusterHosts...)
-	cluster.ProtoVersion = *flagProto
-	cluster.CQLVersion = *flagCQL
+	cluster := createCluster()
 	cluster.Keyspace = "invalidKeyspace"
-	cluster = addSslOptions(cluster)
 	session, err := cluster.CreateSession()
 	if err != nil {
 		if err != ErrNoConnectionsStarted {
@@ -481,15 +481,17 @@ func TestNotEnoughQueryArgs(t *testing.T) {
 func TestCreateSessionTimeout(t *testing.T) {
 	go func() {
 		<-time.After(2 * time.Second)
-		t.Fatal("no startup timeout")
+		t.Error("no startup timeout")
 	}()
-	c := NewCluster("127.0.0.1:1")
-	c = addSslOptions(c)
-	_, err := c.CreateSession()
 
+	cluster := createCluster()
+	cluster.Hosts = []string{"127.0.0.1:1"}
+	session, err := cluster.CreateSession()
 	if err == nil {
+		session.Close()
 		t.Fatal("expected ErrNoConnectionsStarted, but no error was returned.")
 	}
+
 	if err != ErrNoConnectionsStarted {
 		t.Fatalf("expected ErrNoConnectionsStarted, but received %v", err)
 	}
@@ -503,6 +505,7 @@ type FullName struct {
 func (n FullName) MarshalCQL(info *TypeInfo) ([]byte, error) {
 	return []byte(n.FirstName + " " + n.LastName), nil
 }
+
 func (n *FullName) UnmarshalCQL(info *TypeInfo, data []byte) error {
 	t := strings.SplitN(string(data), " ", 2)
 	n.FirstName, n.LastName = t[0], t[1]
@@ -1702,5 +1705,123 @@ func TestKeyspaceMetadata(t *testing.T) {
 	}
 	if thirdColumn.Index.Name != "index_metadata" {
 		t.Errorf("Expected column index named 'index_metadata' but was '%s'", thirdColumn.Index.Name)
+	}
+}
+
+func TestRoutingKey(t *testing.T) {
+	session := createSession(t)
+	defer session.Close()
+
+	if err := createTable(session, "CREATE TABLE test_single_routing_key (first_id int, second_id int, PRIMARY KEY (first_id, second_id))"); err != nil {
+		t.Fatalf("failed to create table with error '%v'", err)
+	}
+	if err := createTable(session, "CREATE TABLE test_composite_routing_key (first_id int, second_id int, PRIMARY KEY ((first_id, second_id)))"); err != nil {
+		t.Fatalf("failed to create table with error '%v'", err)
+	}
+
+	routingKeyInfo, err := session.routingKeyInfo("SELECT * FROM test_single_routing_key WHERE second_id=? AND first_id=?")
+	if err != nil {
+		t.Fatalf("failed to get routing key info due to error: %v", err)
+	}
+	if routingKeyInfo == nil {
+		t.Fatal("Expected routing key info, but was nil")
+	}
+	if len(routingKeyInfo.indexes) != 1 {
+		t.Fatalf("Expected routing key indexes length to be 1 but was %d", len(routingKeyInfo.indexes))
+	}
+	if routingKeyInfo.indexes[0] != 1 {
+		t.Errorf("Expected routing key index[0] to be 1 but was %d", routingKeyInfo.indexes[0])
+	}
+	if len(routingKeyInfo.types) != 1 {
+		t.Fatalf("Expected routing key types length to be 1 but was %d", len(routingKeyInfo.types))
+	}
+	if routingKeyInfo.types[0] == nil {
+		t.Fatal("Expected routing key types[0] to be non-nil")
+	}
+	if routingKeyInfo.types[0].Type != TypeInt {
+		t.Fatalf("Expected routing key types[0].Type to be %v but was %v", TypeInt, routingKeyInfo.types[0])
+	}
+
+	// verify the cache is working
+	routingKeyInfo, err = session.routingKeyInfo("SELECT * FROM test_single_routing_key WHERE second_id=? AND first_id=?")
+	if err != nil {
+		t.Fatalf("failed to get routing key info due to error: %v", err)
+	}
+	if len(routingKeyInfo.indexes) != 1 {
+		t.Fatalf("Expected routing key indexes length to be 1 but was %d", len(routingKeyInfo.indexes))
+	}
+	if routingKeyInfo.indexes[0] != 1 {
+		t.Errorf("Expected routing key index[0] to be 1 but was %d", routingKeyInfo.indexes[0])
+	}
+	if len(routingKeyInfo.types) != 1 {
+		t.Fatalf("Expected routing key types length to be 1 but was %d", len(routingKeyInfo.types))
+	}
+	if routingKeyInfo.types[0] == nil {
+		t.Fatal("Expected routing key types[0] to be non-nil")
+	}
+	if routingKeyInfo.types[0].Type != TypeInt {
+		t.Fatalf("Expected routing key types[0] to be %v but was %v", TypeInt, routingKeyInfo.types[0])
+	}
+	cacheSize := session.routingKeyInfoCache.lru.Len()
+	if cacheSize != 1 {
+		t.Errorf("Expected cache size to be 1 but was %d", cacheSize)
+	}
+
+	query := session.Query("SELECT * FROM test_single_routing_key WHERE second_id=? AND first_id=?", 1, 2)
+	routingKey, err := query.GetRoutingKey()
+	if err != nil {
+		t.Fatalf("Failed to get routing key due to error: %v", err)
+	}
+	expectedRoutingKey := []byte{0, 0, 0, 2}
+	if !reflect.DeepEqual(expectedRoutingKey, routingKey) {
+		t.Errorf("Expected routing key %v but was %v", expectedRoutingKey, routingKey)
+	}
+
+	routingKeyInfo, err = session.routingKeyInfo("SELECT * FROM test_composite_routing_key WHERE second_id=? AND first_id=?")
+	if err != nil {
+		t.Fatalf("failed to get routing key info due to error: %v", err)
+	}
+	if routingKeyInfo == nil {
+		t.Fatal("Expected routing key info, but was nil")
+	}
+	if len(routingKeyInfo.indexes) != 2 {
+		t.Fatalf("Expected routing key indexes length to be 2 but was %d", len(routingKeyInfo.indexes))
+	}
+	if routingKeyInfo.indexes[0] != 1 {
+		t.Errorf("Expected routing key index[0] to be 1 but was %d", routingKeyInfo.indexes[0])
+	}
+	if routingKeyInfo.indexes[1] != 0 {
+		t.Errorf("Expected routing key index[1] to be 0 but was %d", routingKeyInfo.indexes[1])
+	}
+	if len(routingKeyInfo.types) != 2 {
+		t.Fatalf("Expected routing key types length to be 1 but was %d", len(routingKeyInfo.types))
+	}
+	if routingKeyInfo.types[0] == nil {
+		t.Fatal("Expected routing key types[0] to be non-nil")
+	}
+	if routingKeyInfo.types[0].Type != TypeInt {
+		t.Fatalf("Expected routing key types[0] to be %v but was %v", TypeInt, routingKeyInfo.types[0])
+	}
+	if routingKeyInfo.types[1] == nil {
+		t.Fatal("Expected routing key types[1] to be non-nil")
+	}
+	if routingKeyInfo.types[1].Type != TypeInt {
+		t.Fatalf("Expected routing key types[0] to be %v but was %v", TypeInt, routingKeyInfo.types[1])
+	}
+
+	query = session.Query("SELECT * FROM test_composite_routing_key WHERE second_id=? AND first_id=?", 1, 2)
+	routingKey, err = query.GetRoutingKey()
+	if err != nil {
+		t.Fatalf("Failed to get routing key due to error: %v", err)
+	}
+	expectedRoutingKey = []byte{0, 4, 0, 0, 0, 2, 0, 0, 4, 0, 0, 0, 1, 0}
+	if !reflect.DeepEqual(expectedRoutingKey, routingKey) {
+		t.Errorf("Expected routing key %v but was %v", expectedRoutingKey, routingKey)
+	}
+
+	// verify the cache is working
+	cacheSize = session.routingKeyInfoCache.lru.Len()
+	if cacheSize != 2 {
+		t.Errorf("Expected cache size to be 2 but was %d", cacheSize)
 	}
 }

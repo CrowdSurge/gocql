@@ -16,7 +16,7 @@ Supported Versions
 
 The following matrix shows the versions of Go and Cassandra that are tested with the integration test suite as part of the CI build:
 
-Go/Cassandra | 1.2.19 | 2.0.11 | 2.1.2
+Go/Cassandra | 1.2.19 | 2.0.14 | 2.1.4
 -------------| -------| ------| ---------
 1.3  | yes | yes | yes
 1.4  | yes | yes | yes
@@ -47,14 +47,17 @@ Features
   * Automatic reconnect on connection failures with exponential falloff
   * Round robin distribution of queries to different hosts
   * Round robin distribution of queries to different connections on a host
-  * Each connection can execute up to 128 concurrent queries
+  * Each connection can execute up to n concurrent queries (whereby n is the limit set by the protocol version the client chooses to use)
   * Optional automatic discovery of nodes
   * Optional support for periodic node discovery via system.peers
+* Support for password authentication
 * Iteration over paged results with configurable page size
 * Support for TLS/SSL
 * Optional frame compression (using snappy)
 * Automatic query preparation
 * Support for query tracing
+* Experimental support for CQL protocol version 3
+* An API to access the schema metadata of a given keyspace
 
 Please visit the [Roadmap](https://github.com/gocql/gocql/wiki/Roadmap) page to see what is on the horizion.
 
