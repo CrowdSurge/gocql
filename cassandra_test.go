@@ -18,7 +18,7 @@ import (
 	"time"
 	"unicode"
 
-	"speter.net/go/exp/math/dec/inf"
+	"gopkg.in/inf.v0"
 )
 
 var (
@@ -30,6 +30,7 @@ var (
 	flagRetry        = flag.Int("retries", 5, "number of times to retry queries")
 	flagAutoWait     = flag.Duration("autowait", 1000*time.Millisecond, "time to wait for autodiscovery to fill the hosts poll")
 	flagRunSslTest   = flag.Bool("runssl", false, "Set to true to run ssl test")
+	flagRunAuthTest  = flag.Bool("runauth", false, "Set to true to run authentication test")
 	flagCompressTest = flag.String("compressor", "", "compressor to use")
 	clusterHosts     []string
 )
@@ -86,27 +87,38 @@ func createCluster() *ClusterConfig {
 }
 
 func createKeyspace(tb testing.TB, cluster *ClusterConfig, keyspace string) {
-	session, err := cluster.CreateSession()
+	c := *cluster
+	c.Keyspace = "system"
+	session, err := c.CreateSession()
 	if err != nil {
 		tb.Fatal("createSession:", err)
 	}
-	if err = session.Query(`DROP KEYSPACE ` + keyspace).Exec(); err != nil {
-		tb.Log("drop keyspace:", err)
+
+	// should reuse the same conn apparently
+	conn := session.Pool.Pick(nil)
+	if conn == nil {
+		tb.Fatal("no connections available in the pool")
 	}
-	if err := session.Query(fmt.Sprintf(`CREATE KEYSPACE %s
+
+	err = conn.executeQuery(session.Query(`DROP KEYSPACE IF EXISTS ` + keyspace).Consistency(All)).Close()
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	query := session.Query(fmt.Sprintf(`CREATE KEYSPACE %s
 	WITH replication = {
 		'class' : 'SimpleStrategy',
 		'replication_factor' : %d
-	}`, keyspace, *flagRF)).Consistency(All).Exec(); err != nil {
-		tb.Fatalf("error creating keyspace %s: %v", keyspace, err)
+	}`, keyspace, *flagRF)).Consistency(All)
+
+	if err = conn.executeQuery(query).Close(); err != nil {
+		tb.Fatal(err)
 	}
+
 	tb.Logf("Created keyspace %s", keyspace)
-	session.Close()
 }
 
-func createSession(tb testing.TB) *Session {
-	cluster := createCluster()
-
+func createSessionFromCluster(cluster *ClusterConfig, tb testing.TB) *Session {
 	// Drop and re-create the keyspace once. Different tests should use their own
 	// individual tables, but can assume that the table does not exist before.
 	initOnce.Do(func() {
@@ -120,6 +132,38 @@ func createSession(tb testing.TB) *Session {
 	}
 
 	return session
+}
+
+func createSession(tb testing.TB) *Session {
+	cluster := createCluster()
+	return createSessionFromCluster(cluster, tb)
+}
+
+// TestAuthentication verifies that gocql will work with a host configured to only accept authenticated connections
+func TestAuthentication(t *testing.T) {
+
+	if *flagProto < 2 {
+		t.Skip("Authentication is not supported with protocol < 2")
+	}
+
+	if !*flagRunAuthTest {
+		t.Skip("Authentication is not configured in the target cluster")
+	}
+
+	cluster := createCluster()
+
+	cluster.Authenticator = PasswordAuthenticator{
+		Username: "cassandra",
+		Password: "cassandra",
+	}
+
+	session, err := cluster.CreateSession()
+
+	if err != nil {
+		t.Fatalf("Authentication error: %s", err)
+	}
+
+	session.Close()
 }
 
 //TestRingDiscovery makes sure that you can autodiscover other cluster members when you seed a cluster config with just one node
@@ -251,6 +295,7 @@ func TestCAS(t *testing.T) {
 
 	session := createSession(t)
 	defer session.Close()
+	session.cfg.SerialConsistency = LocalSerial
 
 	if err := createTable(session, `CREATE TABLE cas_table (
 			title         varchar,
@@ -380,6 +425,47 @@ func TestBatch(t *testing.T) {
 	}
 }
 
+func TestUnpreparedBatch(t *testing.T) {
+	if *flagProto == 1 {
+		t.Skip("atomic batches not supported. Please use Cassandra >= 2.0")
+	}
+
+	session := createSession(t)
+	defer session.Close()
+
+	if err := createTable(session, `CREATE TABLE batch_unprepared (id int primary key, c counter)`); err != nil {
+		t.Fatal("create table:", err)
+	}
+
+	var batch *Batch
+	if *flagProto == 2 {
+		batch = NewBatch(CounterBatch)
+	} else {
+		batch = NewBatch(UnloggedBatch)
+	}
+
+	for i := 0; i < 100; i++ {
+		batch.Query(`UPDATE batch_unprepared SET c = c + 1 WHERE id = 1`)
+	}
+
+	if err := session.ExecuteBatch(batch); err != nil {
+		t.Fatal("execute batch:", err)
+	}
+
+	count := 0
+	if err := session.Query(`SELECT COUNT(*) FROM batch_unprepared`).Scan(&count); err != nil {
+		t.Fatal("select count:", err)
+	} else if count != 1 {
+		t.Fatalf("count: expected %d, got %d\n", 100, count)
+	}
+
+	if err := session.Query(`SELECT c FROM batch_unprepared`).Scan(&count); err != nil {
+		t.Fatal("select count:", err)
+	} else if count != 100 {
+		t.Fatalf("count: expected %d, got %d\n", 100, count)
+	}
+}
+
 // TestBatchLimit tests gocql to make sure batch operations larger than the maximum
 // statement limit are not submitted to a cassandra node.
 func TestBatchLimit(t *testing.T) {
@@ -401,6 +487,30 @@ func TestBatchLimit(t *testing.T) {
 		t.Fatal("gocql attempted to execute a batch larger than the support limit of statements.")
 	}
 
+}
+
+func TestWhereIn(t *testing.T) {
+	session := createSession(t)
+	defer session.Close()
+
+	if err := createTable(session, `CREATE TABLE where_in_table (id int, cluster int, primary key (id,cluster))`); err != nil {
+		t.Fatal("create table:", err)
+	}
+
+	if err := session.Query("INSERT INTO where_in_table (id, cluster) VALUES (?,?)", 100, 200).Exec(); err != nil {
+		t.Fatal("insert:", err)
+	}
+
+	iter := session.Query("SELECT * FROM where_in_table WHERE id = ? AND cluster IN (?)", 100, 200).Iter()
+	var id, cluster int
+	count := 0
+	for iter.Scan(&id, &cluster) {
+		count++
+	}
+
+	if id != 100 || cluster != 200 {
+		t.Fatalf("Was expecting id and cluster to be (100,200) but were (%d,%d)", id, cluster)
+	}
 }
 
 // TestTooManyQueryArgs tests to make sure the library correctly handles the application level bug
@@ -502,11 +612,11 @@ type FullName struct {
 	LastName  string
 }
 
-func (n FullName) MarshalCQL(info *TypeInfo) ([]byte, error) {
+func (n FullName) MarshalCQL(info TypeInfo) ([]byte, error) {
 	return []byte(n.FirstName + " " + n.LastName), nil
 }
 
-func (n *FullName) UnmarshalCQL(info *TypeInfo, data []byte) error {
+func (n *FullName) UnmarshalCQL(info TypeInfo, data []byte) error {
 	t := strings.SplitN(string(data), " ", 2)
 	n.FirstName, n.LastName = t[0], t[1]
 	return nil
@@ -973,16 +1083,21 @@ func injectInvalidPreparedStatement(t *testing.T, session *Session, table string
 	stmtsLRU.Lock()
 	stmtsLRU.lru.Add(conn.addr+stmt, flight)
 	stmtsLRU.Unlock()
-	flight.info = &QueryInfo{
-		Id: []byte{'f', 'o', 'o', 'b', 'a', 'r'},
-		Args: []ColumnInfo{ColumnInfo{
-			Keyspace: "gocql_test",
-			Table:    table,
-			Name:     "foo",
-			TypeInfo: &TypeInfo{
-				Type: TypeVarchar,
-			},
-		}},
+	flight.info = &resultPreparedFrame{
+		preparedID: []byte{'f', 'o', 'o', 'b', 'a', 'r'},
+		reqMeta: preparedMetadata{
+			resultMetadata: resultMetadata{
+				columns: []ColumnInfo{
+					{
+						Keyspace: "gocql_test",
+						Table:    table,
+						Name:     "foo",
+						TypeInfo: NativeType{
+							typ: TypeVarchar,
+						},
+					},
+				},
+			}},
 	}
 	return stmt, conn
 }
@@ -1045,13 +1160,13 @@ func TestQueryInfo(t *testing.T) {
 		t.Fatalf("Failed to execute query for preparing statement: %v", err)
 	}
 
-	if len(info.Args) != 1 {
-		t.Fatalf("Was not expecting meta data for %d query arguments, but got %d\n", 1, len(info.Args))
+	if len(info.reqMeta.columns) != 1 {
+		t.Fatalf("Was not expecting meta data for %d query arguments, but got %d\n", 1, len(info.reqMeta.columns))
 	}
 
 	if *flagProto > 1 {
-		if len(info.Rval) != 2 {
-			t.Fatalf("Was not expecting meta data for %d result columns, but got %d\n", 2, len(info.Rval))
+		if len(info.respMeta.columns) != 2 {
+			t.Fatalf("Was not expecting meta data for %d result columns, but got %d\n", 2, len(info.respMeta.columns))
 		}
 	}
 }
@@ -1100,6 +1215,8 @@ func TestPreparedCacheEviction(t *testing.T) {
 		t.Fatalf("insert into prepcachetest failed, error '%v'", err)
 	}
 
+	stmtsLRU.Lock()
+
 	//Make sure the cache size is maintained
 	if stmtsLRU.lru.Len() != stmtsLRU.lru.MaxEntries {
 		t.Fatalf("expected cache size of %v, got %v", stmtsLRU.lru.MaxEntries, stmtsLRU.lru.Len())
@@ -1122,8 +1239,10 @@ func TestPreparedCacheEviction(t *testing.T) {
 
 		_, ok = stmtsLRU.lru.Get(session.cfg.Hosts[i] + ":9042gocql_testSELECT id,mod FROM prepcachetest WHERE id = 0")
 		selEvict = selEvict || !ok
-
 	}
+
+	stmtsLRU.Unlock()
+
 	if !selEvict {
 		t.Fatalf("expected first select statement to be purged, but statement was found in the cache.")
 	}
@@ -1431,6 +1550,7 @@ func TestEmptyTimestamp(t *testing.T) {
 	}
 }
 
+// Integration test of just querying for data from the system.schema_keyspace table
 func TestGetKeyspaceMetadata(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -1464,6 +1584,7 @@ func TestGetKeyspaceMetadata(t *testing.T) {
 	}
 }
 
+// Integration test of just querying for data from the system.schema_columnfamilies table
 func TestGetTableMetadata(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -1532,19 +1653,22 @@ func TestGetTableMetadata(t *testing.T) {
 	if testTable.DefaultValidator != "org.apache.cassandra.db.marshal.BytesType" {
 		t.Errorf("Expected test_table_metadata key validator to be 'org.apache.cassandra.db.marshal.BytesType' but was '%s'", testTable.DefaultValidator)
 	}
-	expectedKeyAliases := []string{"first_id"}
-	if !reflect.DeepEqual(testTable.KeyAliases, expectedKeyAliases) {
-		t.Errorf("Expected key aliases %v but was %v", expectedKeyAliases, testTable.KeyAliases)
-	}
-	expectedColumnAliases := []string{"second_id"}
-	if !reflect.DeepEqual(testTable.ColumnAliases, expectedColumnAliases) {
-		t.Errorf("Expected key aliases %v but was %v", expectedColumnAliases, testTable.ColumnAliases)
+	if *flagProto < protoVersion4 {
+		expectedKeyAliases := []string{"first_id"}
+		if !reflect.DeepEqual(testTable.KeyAliases, expectedKeyAliases) {
+			t.Errorf("Expected key aliases %v but was %v", expectedKeyAliases, testTable.KeyAliases)
+		}
+		expectedColumnAliases := []string{"second_id"}
+		if !reflect.DeepEqual(testTable.ColumnAliases, expectedColumnAliases) {
+			t.Errorf("Expected key aliases %v but was %v", expectedColumnAliases, testTable.ColumnAliases)
+		}
 	}
 	if testTable.ValueAlias != "" {
 		t.Errorf("Expected value alias '' but was '%s'", testTable.ValueAlias)
 	}
 }
 
+// Integration test of just querying for data from the system.schema_columns table
 func TestGetColumnMetadata(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -1646,6 +1770,7 @@ func TestGetColumnMetadata(t *testing.T) {
 	}
 }
 
+// Integration test of querying and composition the keyspace metadata
 func TestKeyspaceMetadata(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -1708,6 +1833,7 @@ func TestKeyspaceMetadata(t *testing.T) {
 	}
 }
 
+// Integration test of the routing key calculation
 func TestRoutingKey(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -1738,8 +1864,8 @@ func TestRoutingKey(t *testing.T) {
 	if routingKeyInfo.types[0] == nil {
 		t.Fatal("Expected routing key types[0] to be non-nil")
 	}
-	if routingKeyInfo.types[0].Type != TypeInt {
-		t.Fatalf("Expected routing key types[0].Type to be %v but was %v", TypeInt, routingKeyInfo.types[0])
+	if routingKeyInfo.types[0].Type() != TypeInt {
+		t.Fatalf("Expected routing key types[0].Type to be %v but was %v", TypeInt, routingKeyInfo.types[0].Type())
 	}
 
 	// verify the cache is working
@@ -1759,8 +1885,8 @@ func TestRoutingKey(t *testing.T) {
 	if routingKeyInfo.types[0] == nil {
 		t.Fatal("Expected routing key types[0] to be non-nil")
 	}
-	if routingKeyInfo.types[0].Type != TypeInt {
-		t.Fatalf("Expected routing key types[0] to be %v but was %v", TypeInt, routingKeyInfo.types[0])
+	if routingKeyInfo.types[0].Type() != TypeInt {
+		t.Fatalf("Expected routing key types[0] to be %v but was %v", TypeInt, routingKeyInfo.types[0].Type())
 	}
 	cacheSize := session.routingKeyInfoCache.lru.Len()
 	if cacheSize != 1 {
@@ -1799,14 +1925,14 @@ func TestRoutingKey(t *testing.T) {
 	if routingKeyInfo.types[0] == nil {
 		t.Fatal("Expected routing key types[0] to be non-nil")
 	}
-	if routingKeyInfo.types[0].Type != TypeInt {
-		t.Fatalf("Expected routing key types[0] to be %v but was %v", TypeInt, routingKeyInfo.types[0])
+	if routingKeyInfo.types[0].Type() != TypeInt {
+		t.Fatalf("Expected routing key types[0] to be %v but was %v", TypeInt, routingKeyInfo.types[0].Type())
 	}
 	if routingKeyInfo.types[1] == nil {
 		t.Fatal("Expected routing key types[1] to be non-nil")
 	}
-	if routingKeyInfo.types[1].Type != TypeInt {
-		t.Fatalf("Expected routing key types[0] to be %v but was %v", TypeInt, routingKeyInfo.types[1])
+	if routingKeyInfo.types[1].Type() != TypeInt {
+		t.Fatalf("Expected routing key types[0] to be %v but was %v", TypeInt, routingKeyInfo.types[1].Type())
 	}
 
 	query = session.Query("SELECT * FROM test_composite_routing_key WHERE second_id=? AND first_id=?", 1, 2)
@@ -1823,5 +1949,211 @@ func TestRoutingKey(t *testing.T) {
 	cacheSize = session.routingKeyInfoCache.lru.Len()
 	if cacheSize != 2 {
 		t.Errorf("Expected cache size to be 2 but was %d", cacheSize)
+	}
+}
+
+// Integration test of the token-aware policy-based connection pool
+func TestTokenAwareConnPool(t *testing.T) {
+	cluster := createCluster()
+	cluster.ConnPoolType = NewTokenAwareConnPool
+	cluster.DiscoverHosts = true
+
+	// Drop and re-create the keyspace once. Different tests should use their own
+	// individual tables, but can assume that the table does not exist before.
+	initOnce.Do(func() {
+		createKeyspace(t, cluster, "gocql_test")
+	})
+
+	cluster.Keyspace = "gocql_test"
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal("createSession:", err)
+	}
+	defer session.Close()
+
+	if *clusterSize > 1 {
+		// wait for autodiscovery to update the pool with the list of known hosts
+		time.Sleep(*flagAutoWait)
+	}
+
+	if session.Pool.Size() != cluster.NumConns*len(cluster.Hosts) {
+		t.Errorf("Expected pool size %d but was %d", cluster.NumConns*len(cluster.Hosts), session.Pool.Size())
+	}
+
+	if err := createTable(session, "CREATE TABLE test_token_aware (id int, data text, PRIMARY KEY (id))"); err != nil {
+		t.Fatalf("failed to create test_token_aware table with err: %v", err)
+	}
+	query := session.Query("INSERT INTO test_token_aware (id, data) VALUES (?,?)", 42, "8 * 6 =")
+	if err := query.Exec(); err != nil {
+		t.Fatalf("failed to insert with err: %v", err)
+	}
+	query = session.Query("SELECT data FROM test_token_aware where id = ?", 42).Consistency(One)
+	iter := query.Iter()
+	var data string
+	if !iter.Scan(&data) {
+		t.Error("failed to scan data")
+	}
+	if err := iter.Close(); err != nil {
+		t.Errorf("iter failed with err: %v", err)
+	}
+
+	// TODO add verification that the query went to the correct host
+}
+
+type frameWriterFunc func(framer *framer, streamID int) error
+
+func (f frameWriterFunc) writeFrame(framer *framer, streamID int) error {
+	return f(framer, streamID)
+}
+
+func TestStream0(t *testing.T) {
+	session := createSession(t)
+	defer session.Close()
+
+	var conn *Conn
+	for i := 0; i < 5; i++ {
+		if conn != nil {
+			break
+		}
+
+		conn = session.Pool.Pick(nil)
+	}
+
+	if conn == nil {
+		t.Fatal("no connections available in the pool")
+	}
+
+	writer := frameWriterFunc(func(f *framer, streamID int) error {
+		if streamID == 0 {
+			t.Fatal("should not use stream 0 for requests")
+		}
+		f.writeHeader(0, opError, streamID)
+		f.writeString("i am a bad frame")
+		f.wbuf[0] = 0xFF
+		return f.finishWrite()
+	})
+
+	const expErr = "gocql: error on stream 0:"
+	// need to write out an invalid frame, which we need a connection to do
+	frame, err := conn.exec(writer, nil)
+	if err == nil {
+		t.Fatal("expected to get an error on stream 0")
+	} else if !strings.HasPrefix(err.Error(), expErr) {
+		t.Fatalf("expected to get error prefix %q got %q", expErr, err.Error())
+	} else if frame != nil {
+		t.Fatalf("expected to get nil frame got %+v", frame)
+	}
+}
+
+func TestNegativeStream(t *testing.T) {
+	session := createSession(t)
+	defer session.Close()
+
+	var conn *Conn
+	for i := 0; i < 5; i++ {
+		if conn != nil {
+			break
+		}
+
+		conn = session.Pool.Pick(nil)
+	}
+
+	if conn == nil {
+		t.Fatal("no connections available in the pool")
+	}
+
+	const stream = -50
+	writer := frameWriterFunc(func(f *framer, streamID int) error {
+		f.writeHeader(0, opOptions, stream)
+		return f.finishWrite()
+	})
+
+	frame, err := conn.exec(writer, nil)
+	if err == nil {
+		t.Fatalf("expected to get an error on stream %d", stream)
+	} else if frame != nil {
+		t.Fatalf("expected to get nil frame got %+v", frame)
+	}
+}
+
+func TestManualQueryPaging(t *testing.T) {
+	const rowsToInsert = 5
+
+	session := createSession(t)
+	defer session.Close()
+
+	if err := createTable(session, "CREATE TABLE testManualPaging (id int, count int, PRIMARY KEY (id))"); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < rowsToInsert; i++ {
+		err := session.Query("INSERT INTO testManualPaging(id, count) VALUES(?, ?)", i, i*i).Exec()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// disable auto paging, 1 page per iteration
+	query := session.Query("SELECT id, count FROM testManualPaging").PageState(nil).PageSize(2)
+	var id, count, fetched int
+
+	iter := query.Iter()
+	// NOTE: this isnt very indicitive of how it should be used, the idea is that
+	// the page state is returned to some client who will send it back to manually
+	// page through the results.
+	for {
+		for iter.Scan(&id, &count) {
+			if count != (id * id) {
+				t.Fatalf("got wrong value from iteration: got %d expected %d", count, id*id)
+			}
+
+			fetched++
+		}
+
+		if len(iter.PageState()) > 0 {
+			// more pages
+			iter = query.PageState(iter.PageState()).Iter()
+		} else {
+			break
+		}
+	}
+
+	if err := iter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if fetched != rowsToInsert {
+		t.Fatalf("expected to fetch %d rows got %d", fetched, rowsToInsert)
+	}
+}
+
+func TestLexicalUUIDType(t *testing.T) {
+	session := createSession(t)
+	defer session.Close()
+
+	if err := createTable(session, `CREATE TABLE test_lexical_uuid (
+			key     varchar,
+			column1 'org.apache.cassandra.db.marshal.LexicalUUIDType',
+			value   int,
+			PRIMARY KEY (key, column1)
+		)`); err != nil {
+		t.Fatal("create:", err)
+	}
+
+	key := TimeUUID().String()
+	column1 := TimeUUID()
+
+	err := session.Query("INSERT INTO test_lexical_uuid(key, column1, value) VALUES(?, ?, ?)", key, column1, 55).Exec()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var gotUUID UUID
+	if err := session.Query("SELECT column1 from test_lexical_uuid where key = ? AND column1 = ?", key, column1).Scan(&gotUUID); err != nil {
+		t.Fatal(err)
+	}
+
+	if gotUUID != column1 {
+		t.Errorf("got %s, expected %s", gotUUID, column1)
 	}
 }

@@ -1,6 +1,7 @@
 gocql
 =====
 
+[![Join the chat at https://gitter.im/gocql/gocql](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/gocql/gocql?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 [![Build Status](https://travis-ci.org/gocql/gocql.png?branch=master)](https://travis-ci.org/gocql/gocql)
 [![GoDoc](http://godoc.org/github.com/gocql/gocql?status.png)](http://godoc.org/github.com/gocql/gocql)
 
@@ -16,10 +17,10 @@ Supported Versions
 
 The following matrix shows the versions of Go and Cassandra that are tested with the integration test suite as part of the CI build:
 
-Go/Cassandra | 1.2.19 | 2.0.14 | 2.1.4
+Go/Cassandra | 1.2.x | 2.0.x | 2.1.x
 -------------| -------| ------| ---------
-1.3  | yes | yes | yes
 1.4  | yes | yes | yes
+1.5  | yes | yes | yes
 
 
 Sunsetting Model
@@ -50,13 +51,18 @@ Features
   * Each connection can execute up to n concurrent queries (whereby n is the limit set by the protocol version the client chooses to use)
   * Optional automatic discovery of nodes
   * Optional support for periodic node discovery via system.peers
+  * Policy based connection pool with token aware and round-robin policy implementations
 * Support for password authentication
 * Iteration over paged results with configurable page size
 * Support for TLS/SSL
 * Optional frame compression (using snappy)
 * Automatic query preparation
 * Support for query tracing
-* Experimental support for CQL protocol version 3
+* Support for Cassandra 2.1+ [binary protocol version 3](https://github.com/apache/cassandra/blob/trunk/doc/native_protocol_v3.spec)
+  * Support for up to 32768 streams
+  * Support for tuple types
+  * Support for client side timestamps by default
+  * Support for UDTs via a custom marshaller or struct tags
 * An API to access the schema metadata of a given keyspace
 
 Please visit the [Roadmap](https://github.com/gocql/gocql/wiki/Roadmap) page to see what is on the horizion.
@@ -90,7 +96,7 @@ Example of incorrect usage:
 	}
 ```
 This will result in an err being returned from the session.Query line as the user is trying to execute a "use"
-statement. 
+statement.
 
 Example
 -------
@@ -158,7 +164,8 @@ There are various ways to bind application level data structures to CQL statemen
 * The `Bind()` API provides a client app with a low level mechanism to introspect query meta data and extract appropriate field values from application level data structures.
 * Building on top of the gocql driver, [cqlr](https://github.com/relops/cqlr) adds the ability to auto-bind a CQL iterator to a struct or to bind a struct to an INSERT statement.
 * Another external project that layers on top of gocql is [cqlc](http://relops.com/cqlc) which generates gocql compliant code from your Cassandra schema so that you can write type safe CQL statements in Go with a natural query syntax.
-*  [gocassa](https://github.com/hailocab/gocassa) is an external project that layers on top of gocql to provide convenient query building and data binding.
+* [gocassa](https://github.com/hailocab/gocassa) is an external project that layers on top of gocql to provide convenient query building and data binding.
+* [gocqltable](https://github.com/elvtechnology/gocqltable) provides an ORM-style convenience layer to make CRUD operations with gocql easier.
 
 Ecosphere
 ---------
@@ -170,6 +177,7 @@ The following community maintained tools are known to integrate with gocql:
 * [cqlr](https://github.com/relops/cqlr) adds the ability to auto-bind a CQL iterator to a struct or to bind a struct to an INSERT statement.
 * [cqlc](http://relops.com/cqlc) which generates gocql compliant code from your Cassandra schema so that you can write type safe CQL statements in Go with a natural query syntax.
 * [gocassa](https://github.com/hailocab/gocassa) provides query building, adds data binding, and provides easy-to-use "recipe" tables for common query use-cases.
+* [gocqltable](https://github.com/elvtechnology/gocqltable) is a wrapper around gocql that aims to simplify common operations whilst working the library.
 
 Other Projects
 --------------
@@ -184,6 +192,6 @@ For some reason, when you google `golang cassandra`, this project doesn't featur
 License
 -------
 
-> Copyright (c) 2012-2014 The gocql Authors. All rights reserved.
+> Copyright (c) 2012-2015 The gocql Authors. All rights reserved.
 > Use of this source code is governed by a BSD-style
 > license that can be found in the LICENSE file.
