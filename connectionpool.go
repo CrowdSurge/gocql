@@ -604,11 +604,9 @@ func (p *policyConnPool) Pick(qry *Query) *Conn {
 		}
 
 		pool, ok := p.hostConnPools[host.Peer]
-		if !ok {
-			continue
+		if ok {
+			conn = pool.Pick(qry)
 		}
-
-		conn = pool.Pick(qry)
 	}
 	p.mu.RUnlock()
 	return conn
