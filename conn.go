@@ -90,7 +90,7 @@ type ConnErrorHandler interface {
 // and restarted. This is to prevent a single query timeout from killing a connection
 // which may be serving more queries just fine.
 // Default is 10, should not be changed concurrently with queries.
-var TimeoutLimit int64 = 10
+var TimeoutLimit int64 = 1000
 
 // Conn is a single connection to a Cassandra node. It can be used to execute
 // queries, but users are usually advised to use a more reliable, higher
