@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/gocql/gocql/lru"
+	"github.com/CrowdSurge/gocql/lru"
 )
 
 // Session is the interface used by users to interact with the database.
@@ -1036,7 +1036,7 @@ var (
 	ErrUnavailable   = errors.New("unavailable")
 	ErrUnsupported   = errors.New("feature not supported")
 	ErrTooManyStmts  = errors.New("too many statements")
-	ErrUseStmt       = errors.New("use statements aren't supported. Please see https://github.com/gocql/gocql for explaination.")
+	ErrUseStmt       = errors.New("use statements aren't supported. Please see https://github.com/CrowdSurge/gocql for explaination.")
 	ErrSessionClosed = errors.New("session has been closed")
 	ErrNoConnections = errors.New("no connections available")
 	ErrNoKeyspace    = errors.New("no keyspace provided")
