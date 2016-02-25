@@ -44,8 +44,8 @@ There are legitimate examples of where it is infeasible to write a regression te
 
 Examples of pull requests that have been accepted without tests include:
 
-* https://github.com/gocql/gocql/pull/181 - this patch would otherwise require a multi-node cluster to be booted as part of the CI build
-* https://github.com/gocql/gocql/pull/179 - this bug can only be reproduced under heavy load in certain circumstances
+* https://github.com/songkick/gocql/pull/181 - this patch would otherwise require a multi-node cluster to be booted as part of the CI build
+* https://github.com/songkick/gocql/pull/179 - this bug can only be reproduced under heavy load in certain circumstances
 
 ### Sign Off Procedure
 

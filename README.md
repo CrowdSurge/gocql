@@ -3,13 +3,13 @@ gocql
 
 [![Join the chat at https://gitter.im/gocql/gocql](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/gocql/gocql?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 [![Build Status](https://travis-ci.org/gocql/gocql.png?branch=master)](https://travis-ci.org/gocql/gocql)
-[![GoDoc](http://godoc.org/github.com/gocql/gocql?status.png)](http://godoc.org/github.com/gocql/gocql)
+[![GoDoc](http://godoc.org/github.com/songkick/gocql?status.png)](http://godoc.org/github.com/songkick/gocql)
 
 Package gocql implements a fast and robust Cassandra client for the
 Go programming language.
 
 Project Website: http://gocql.github.io/<br>
-API documentation: http://godoc.org/github.com/gocql/gocql<br>
+API documentation: http://godoc.org/github.com/songkick/gocql<br>
 Discussions: https://groups.google.com/forum/#!forum/gocql
 
 Production Stability
@@ -41,7 +41,7 @@ In general, the gocql team will focus on supporting the current and previous ver
 Installation
 ------------
 
-    go get github.com/gocql/gocql
+    go get github.com/songkick/gocql
 
 
 Features
@@ -135,7 +135,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/gocql/gocql"
+	"github.com/songkick/gocql"
 )
 
 func main() {
