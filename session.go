@@ -1021,6 +1021,11 @@ func (iter *Iter) WillSwitchPage() bool {
 	return iter.pos >= iter.numRows && iter.next != nil
 }
 
+// CheckErr exposes iterator errors
+func (iter *Iter) CheckErr() error {
+	return iter.err
+}
+
 // checkErrAndNotFound handle error and NotFound in one method.
 func (iter *Iter) checkErrAndNotFound() error {
 	if iter.err != nil {
