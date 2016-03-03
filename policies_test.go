@@ -6,7 +6,7 @@ package gocql
 
 import (
 	"fmt"
-	"github.com/gocql/gocql/internal/streams"
+	"github.com/CrowdSurge/gocql/internal/streams"
 	"testing"
 
 	"github.com/hailocab/go-hostpool"
