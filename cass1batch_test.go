@@ -1,3 +1,5 @@
+// +build all integration
+
 package gocql
 
 import (
@@ -7,8 +9,10 @@ import (
 
 func TestProto1BatchInsert(t *testing.T) {
 	session := createSession(t)
-	if err := session.Query("CREATE TABLE large (id int primary key)").Exec(); err != nil {
-		t.Fatal("create table:", err)
+	defer session.Close()
+
+	if err := createTable(session, "CREATE TABLE gocql_test.large (id int primary key)"); err != nil {
+		t.Fatal(err)
 	}
 
 	begin := "BEGIN BATCH"
@@ -19,7 +23,6 @@ func TestProto1BatchInsert(t *testing.T) {
 	if err := session.Query(fullQuery, args...).Consistency(Quorum).Exec(); err != nil {
 		t.Fatal(err)
 	}
-
 }
 
 func TestShouldPrepareFunction(t *testing.T) {

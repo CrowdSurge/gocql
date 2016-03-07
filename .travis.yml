@@ -1,29 +1,45 @@
 language: go
 
+sudo: false
+
+cache:
+  directories:
+    - $HOME/.ccm/repository
+    - $HOME/.local/lib/python2.7
+
+matrix:
+  fast_finish: true
+
 env:
-  - CASS=1.2.18
-  - CASS=2.0.9
+  global:
+    - GOMAXPROCS=2
+  matrix:
+    - CASS=2.0.17
+      AUTH=false
+    - CASS=2.1.12
+      AUTH=false
+    - CASS=2.2.4
+      AUTH=true
+    - CASS=2.2.5
+      AUTH=false
 
 go:
-  - 1.2
-  - 1.3
-
-before_install:
-  - sudo apt-get update
+  - 1.5.3
+  - 1.6
 
 install:
-  - sudo apt-get install -y libjna-java python-pip
-  - sudo pip install cql PyYAML six
-  - go get code.google.com/p/go.tools/cmd/vet
-  - go get code.google.com/p/go.tools/cmd/cover
+  - pip install --user cql PyYAML six
+  - go get golang.org/x/tools/cmd/vet
+  - go get golang.org/x/tools/cmd/cover
   - git clone https://github.com/pcmanus/ccm.git
   - pushd ccm
-  - sudo ./setup.py install
+  - ./setup.py install --user
   - popd
   - go get .
 
 script:
-  - bash -x integration.sh $CASS
+  - set -e
+  - PATH=$PATH:$HOME/.local/bin bash integration.sh $CASS $AUTH
   - go vet .
 
 notifications:

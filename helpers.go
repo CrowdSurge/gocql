@@ -5,12 +5,13 @@
 package gocql
 
 import (
+	"fmt"
 	"math/big"
 	"reflect"
 	"strings"
 	"time"
 
-	"speter.net/go/exp/math/dec/inf"
+	"gopkg.in/inf.v0"
 )
 
 type RowData struct {
@@ -18,15 +19,9 @@ type RowData struct {
 	Values  []interface{}
 }
 
-// New creates a pointer to an empty version of whatever type
-// is referenced by the TypeInfo receiver
-func (t *TypeInfo) New() interface{} {
-	return reflect.New(goType(t)).Interface()
-}
-
-func goType(t *TypeInfo) reflect.Type {
-	switch t.Type {
-	case TypeVarchar, TypeAscii, TypeInet:
+func goType(t TypeInfo) reflect.Type {
+	switch t.Type() {
+	case TypeVarchar, TypeAscii, TypeInet, TypeText:
 		return reflect.TypeOf(*new(string))
 	case TypeBigInt, TypeCounter:
 		return reflect.TypeOf(*new(int64))
@@ -47,11 +42,17 @@ func goType(t *TypeInfo) reflect.Type {
 	case TypeUUID, TypeTimeUUID:
 		return reflect.TypeOf(*new(UUID))
 	case TypeList, TypeSet:
-		return reflect.SliceOf(goType(t.Elem))
+		return reflect.SliceOf(goType(t.(CollectionType).Elem))
 	case TypeMap:
-		return reflect.MapOf(goType(t.Key), goType(t.Elem))
+		return reflect.MapOf(goType(t.(CollectionType).Key), goType(t.(CollectionType).Elem))
 	case TypeVarint:
 		return reflect.TypeOf(*new(*big.Int))
+	case TypeTuple:
+		// what can we do here? all there is to do is to make a list of interface{}
+		tuple := t.(TupleTypeInfo)
+		return reflect.TypeOf(make([]interface{}, len(tuple.Elems)))
+	case TypeUDT:
+		return reflect.TypeOf(make(map[string]interface{}))
 	default:
 		return nil
 	}
@@ -61,48 +62,112 @@ func dereference(i interface{}) interface{} {
 	return reflect.Indirect(reflect.ValueOf(i)).Interface()
 }
 
-func getApacheCassandraType(class string) Type {
-	if strings.HasPrefix(class, apacheCassandraTypePrefix) {
-		switch strings.TrimPrefix(class, apacheCassandraTypePrefix) {
-		case "AsciiType":
-			return TypeAscii
-		case "LongType":
-			return TypeBigInt
-		case "BytesType":
-			return TypeBlob
-		case "BooleanType":
-			return TypeBoolean
-		case "CounterColumnType":
-			return TypeCounter
-		case "DecimalType":
-			return TypeDecimal
-		case "DoubleType":
-			return TypeDouble
-		case "FloatType":
-			return TypeFloat
-		case "Int32Type":
-			return TypeInt
-		case "DateType":
-			return TypeTimestamp
-		case "UUIDType":
-			return TypeUUID
-		case "UTF8Type":
-			return TypeVarchar
-		case "IntegerType":
-			return TypeVarint
-		case "TimeUUIDType":
-			return TypeTimeUUID
-		case "InetAddressType":
-			return TypeInet
-		case "MapType":
+func getCassandraType(name string) Type {
+	switch name {
+	case "ascii":
+		return TypeAscii
+	case "bigint":
+		return TypeBigInt
+	case "blob":
+		return TypeBlob
+	case "boolean":
+		return TypeBoolean
+	case "counter":
+		return TypeCounter
+	case "decimal":
+		return TypeDecimal
+	case "double":
+		return TypeDouble
+	case "float":
+		return TypeFloat
+	case "int":
+		return TypeInt
+	case "timestamp":
+		return TypeTimestamp
+	case "uuid":
+		return TypeUUID
+	case "varchar", "text":
+		return TypeVarchar
+	case "varint":
+		return TypeVarint
+	case "timeuuid":
+		return TypeTimeUUID
+	case "inet":
+		return TypeInet
+	case "MapType":
+		return TypeMap
+	case "ListType":
+		return TypeList
+	case "SetType":
+		return TypeSet
+	case "TupleType":
+		return TypeTuple
+	default:
+		if strings.HasPrefix(name, "set") {
+			return TypeSet
+		} else if strings.HasPrefix(name, "list") {
+			return TypeList
+		} else if strings.HasPrefix(name, "map") {
 			return TypeMap
-		case "ListType":
-			return TypeInet
-		case "SetType":
-			return TypeInet
+		} else if strings.HasPrefix(name, "tuple") {
+			return TypeTuple
 		}
+		return TypeCustom
 	}
-	return TypeCustom
+}
+
+func getApacheCassandraType(class string) Type {
+	switch strings.TrimPrefix(class, apacheCassandraTypePrefix) {
+	case "AsciiType":
+		return TypeAscii
+	case "LongType":
+		return TypeBigInt
+	case "BytesType":
+		return TypeBlob
+	case "BooleanType":
+		return TypeBoolean
+	case "CounterColumnType":
+		return TypeCounter
+	case "DecimalType":
+		return TypeDecimal
+	case "DoubleType":
+		return TypeDouble
+	case "FloatType":
+		return TypeFloat
+	case "Int32Type":
+		return TypeInt
+	case "DateType", "TimestampType":
+		return TypeTimestamp
+	case "UUIDType", "LexicalUUIDType":
+		return TypeUUID
+	case "UTF8Type":
+		return TypeVarchar
+	case "IntegerType":
+		return TypeVarint
+	case "TimeUUIDType":
+		return TypeTimeUUID
+	case "InetAddressType":
+		return TypeInet
+	case "MapType":
+		return TypeMap
+	case "ListType":
+		return TypeList
+	case "SetType":
+		return TypeSet
+	case "TupleType":
+		return TypeTuple
+	default:
+		return TypeCustom
+	}
+}
+
+func typeCanBeNull(typ TypeInfo) bool {
+	switch typ.(type) {
+	case CollectionType, UDTTypeInfo, TupleTypeInfo:
+		return false
+	}
+
+	return true
 }
 
 func (r *RowData) rowMap(m map[string]interface{}) {
@@ -118,16 +183,34 @@ func (r *RowData) rowMap(m map[string]interface{}) {
 	}
 }
 
+// TupeColumnName will return the column name of a tuple value in a column named
+// c at index n. It should be used if a specific element within a tuple is needed
+// to be extracted from a map returned from SliceMap or MapScan.
+func TupleColumnName(c string, n int) string {
+	return fmt.Sprintf("%s[%d]", c, n)
+}
+
 func (iter *Iter) RowData() (RowData, error) {
 	if iter.err != nil {
 		return RowData{}, iter.err
 	}
+
 	columns := make([]string, 0)
 	values := make([]interface{}, 0)
+
 	for _, column := range iter.Columns() {
-		val := column.TypeInfo.New()
-		columns = append(columns, column.Name)
-		values = append(values, val)
+
+		switch c := column.TypeInfo.(type) {
+		case TupleTypeInfo:
+			for i, elem := range c.Elems {
+				columns = append(columns, TupleColumnName(column.Name, i))
+				values = append(values, elem.New())
+			}
+		default:
+			val := column.TypeInfo.New()
+			columns = append(columns, column.Name)
+			values = append(values, val)
+		}
 	}
 	rowData := RowData{
 		Columns: columns,
@@ -178,4 +261,10 @@ func (iter *Iter) MapScan(m map[string]interface{}) bool {
 		return true
 	}
 	return false
+}
+
+func copyBytes(p []byte) []byte {
+	b := make([]byte, len(p))
+	copy(b, p)
+	return b
 }

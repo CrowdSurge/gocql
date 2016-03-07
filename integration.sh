@@ -5,29 +5,80 @@ set -e
 function run_tests() {
 	local clusterSize=3
 	local version=$1
+	local auth=$2
 
-	ccm create test -v binary:$version -n $clusterSize -d --vnodes
-	
-	sed -i '/#MAX_HEAP_SIZE/c\MAX_HEAP_SIZE="256M"' ~/.ccm/repository/$version/conf/cassandra-env.sh
-	sed -i '/#HEAP_NEWSIZE/c\HEAP_NEWSIZE="100M"' ~/.ccm/repository/$version/conf/cassandra-env.sh
+	if [ "$auth" = true ]; then
+		clusterSize=1
+	fi
 
-	ccm updateconf 'client_encryption_options.enabled: true' 'client_encryption_options.keystore: testdata/pki/.keystore' 'client_encryption_options.keystore_password: cassandra' 'client_encryption_options.require_client_auth: true' 'client_encryption_options.truststore: testdata/pki/.truststore' 'client_encryption_options.truststore_password: cassandra' 'concurrent_reads: 2' 'concurrent_writes: 2' 'rpc_server_type: sync' 'rpc_min_threads: 2' 'rpc_max_threads: 2' 'write_request_timeout_in_ms: 5000' 'read_request_timeout_in_ms: 5000'
-	ccm start
-	ccm status
+	local keypath="$(pwd)/testdata/pki"
+
+	local conf=(
+		"client_encryption_options.enabled: true"
+		"client_encryption_options.keystore: $keypath/.keystore"
+		"client_encryption_options.keystore_password: cassandra"
+		"client_encryption_options.require_client_auth: true"
+		"client_encryption_options.truststore: $keypath/.truststore"
+		"client_encryption_options.truststore_password: cassandra"
+		"concurrent_reads: 2"
+		"concurrent_writes: 2"
+		"rpc_server_type: sync"
+		"rpc_min_threads: 2"
+		"rpc_max_threads: 2"
+		"write_request_timeout_in_ms: 5000"
+		"read_request_timeout_in_ms: 5000"
+	)
+
+	ccm remove test || true
+
+	ccm create test -v $version -n $clusterSize -d --vnodes --jvm_arg="-Xmx256m -XX:NewSize=100m"
+	ccm updateconf "${conf[@]}"
+
+	if [ "$auth" = true ]
+	then
+		ccm updateconf 'authenticator: PasswordAuthenticator' 'authorizer: CassandraAuthorizer'
+		rm -rf $HOME/.ccm/test/node1/data/system_auth
+	fi
 
 	local proto=2
 	if [[ $version == 1.2.* ]]; then
 		proto=1
+	elif [[ $version == 2.0.* ]]; then
+		proto=2
+	elif [[ $version == 2.1.* ]]; then
+		proto=3
+	elif [[ $version == 2.2.* ]]; then
+		proto=4
+		ccm updateconf 'enable_user_defined_functions: true'
 	fi
 
-	go test -cover -v -runssl -proto=$proto -rf=3 -cluster=$(ccm liveset) -clusterSize=$clusterSize -autowait=2000ms ./... > results
+	sleep 1s
 
-	cat results
-	cover=`cat results | grep coverage: | grep -o "[0-9]\{1,3\}" | head -n 1`
-	if [[ $cover -lt "64" ]]; then
-		echo "--- FAIL: expected coverage of at least 64 %, but coverage was $cover %"
-		exit 1
+	ccm list
+	ccm start
+	ccm status
+	ccm node1 nodetool status
+
+	local args="-v -gocql.timeout=60s -runssl -proto=$proto -rf=3 -clusterSize=$clusterSize -autowait=2000ms -compressor=snappy -gocql.cversion=$version -cluster=$(ccm liveset) ./..."
+
+	go test -v -tags unit
+
+	if [ "$auth" = true ]
+	then
+		sleep 30s
+		go test -run=TestAuthentication -tags "integration gocql_debug" -timeout=15s -runauth $args
+	else
+		sleep 1s
+		go test -tags "integration gocql_debug" -timeout=5m $args
+
+		ccm clear
+		ccm start
+		sleep 1s
+
+		go test -tags "ccm gocql_debug" -timeout=5m $args
 	fi
-	ccm clear
+
+	ccm remove
 }
-run_tests $1
+
+run_tests $1 $2

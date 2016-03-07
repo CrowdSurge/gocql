@@ -59,7 +59,7 @@ func init() {
 }
 
 // ParseUUID parses a 32 digit hexadecimal number (that might contain hypens)
-// represanting an UUID.
+// representing an UUID.
 func ParseUUID(input string) (UUID, error) {
 	var u UUID
 	j := 0
@@ -217,7 +217,7 @@ func (u UUID) Time() time.Time {
 	}
 	t := u.Timestamp()
 	sec := t / 1e7
-	nsec := t % 1e7
+	nsec := (t % 1e7) * 100
 	return time.Unix(sec+timeBase, nsec).UTC()
 }
 
@@ -239,4 +239,13 @@ func (u *UUID) UnmarshalJSON(data []byte) error {
 	}
 
 	return err
+}
+
+func (u UUID) MarshalText() ([]byte, error) {
+	return []byte(u.String()), nil
+}
+
+func (u *UUID) UnmarshalText(text []byte) (err error) {
+	*u, err = ParseUUID(string(text))
+	return
 }
